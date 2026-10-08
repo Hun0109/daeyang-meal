@@ -35,7 +35,9 @@ const SupabaseModule = {
         this.cachedData = JSON.parse(contentStr || '{}');
 
         // Notify UI subscribers
-        Object.entries(this.cachedData).forEach(([mealId, counts]) => {
+        document.querySelectorAll('[data-meal-id]').forEach(cardEl => {
+          const mealId = cardEl.getAttribute('data-meal-id');
+          const counts = this.cachedData[mealId] || { like: 0, neutral: 0, dislike: 0 };
           this.realtimeCallbacks.forEach(cb => cb(mealId, counts));
         });
       }
