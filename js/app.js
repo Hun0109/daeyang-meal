@@ -1,11 +1,15 @@
 /**
  * Daeyang High School Meal Assistant Main Application Script
+ * Enhanced with Supabase Realtime Shared Reactions
  */
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  // Initialize Supabase Module
+  SupabaseModule.init();
+
   // State Variables
   let currentDate = new Date();
   let selectedAllergies = JSON.parse(localStorage.getItem('daeyang_allergies') || '[]');
-  let reactionsData = JSON.parse(localStorage.getItem('daeyang_reactions') || '{}');
+  let userReactionsChoice = JSON.parse(localStorage.getItem('daeyang_user_choices') || '{}');
 
   // DOM Elements
   const liveTimeEl = document.getElementById('liveTime');
@@ -40,6 +44,19 @@ document.addEventListener('DOMContentLoaded', () => {
       document.body.setAttribute('data-theme', 'light');
       localStorage.setItem('daeyang_theme', 'light');
       themeToggleBtn.textContent = '☀️';
+    }
+  });
+
+  // Listen to Realtime Reactions Updates across clients
+  SupabaseModule.onRealtimeUpdate((mealId, counts) => {
+    const cardEl = document.querySelector(`[data-meal-id="${mealId}"]`);
+    if (cardEl) {
+      const likeSpan = cardEl.querySelector('.count-like');
+      const neutralSpan = cardEl.querySelector('.count-neutral');
+      const dislikeSpan = cardEl.querySelector('.count-dislike');
+      if (likeSpan) likeSpan.textContent = counts.like || 0;
+      if (neutralSpan) neutralSpan.textContent = counts.neutral || 0;
+      if (dislikeSpan) dislikeSpan.textContent = counts.dislike || 0;
     }
   });
 
@@ -156,19 +173,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     mealContainer.innerHTML = '';
-    meals.forEach(meal => {
-      const card = createMealCard(meal, ymd);
+    for (const meal of meals) {
+      const card = await createMealCard(meal, ymd);
       mealContainer.appendChild(card);
-    });
+    }
   }
 
-  // Create Single Meal Card Element
-  function createMealCard(meal, ymdKey) {
+  // Create Single Meal Card Element with Supabase Shared Reaction Sync
+  async function createMealCard(meal, ymdKey) {
     const card = document.createElement('div');
     card.className = 'meal-card';
 
     const reactionKey = `${ymdKey}_${meal.mealCode}`;
-    const currentReactions = reactionsData[reactionKey] || { like: 0, neutral: 0, dislike: 0, userChoice: null };
+    card.setAttribute('data-meal-id', reactionKey);
+
+    // Fetch Shared Counts from Supabase / Shared DB
+    const sharedCounts = await SupabaseModule.getReactions(reactionKey);
+    const myChoice = userReactionsChoice[reactionKey] || null;
 
     // Header
     let html = `
@@ -229,17 +250,17 @@ document.addEventListener('DOMContentLoaded', () => {
       `;
     }
 
-    // Reaction Bar
+    // Reaction Bar (Realtime Shared Counts)
     html += `
       <div class="reaction-bar">
-        <button class="reaction-btn ${currentReactions.userChoice === 'like' ? 'active' : ''}" data-type="like">
-          👍 존맛 <span>${currentReactions.like}</span>
+        <button class="reaction-btn ${myChoice === 'like' ? 'active' : ''}" data-type="like">
+          👍 존맛 <span class="count-like">${sharedCounts.like}</span>
         </button>
-        <button class="reaction-btn ${currentReactions.userChoice === 'neutral' ? 'active' : ''}" data-type="neutral">
-          😐 보통 <span>${currentReactions.neutral}</span>
+        <button class="reaction-btn ${myChoice === 'neutral' ? 'active' : ''}" data-type="neutral">
+          😐 보통 <span class="count-neutral">${sharedCounts.neutral}</span>
         </button>
-        <button class="reaction-btn ${currentReactions.userChoice === 'dislike' ? 'active' : ''}" data-type="dislike">
-          👎 별로 <span>${currentReactions.dislike}</span>
+        <button class="reaction-btn ${myChoice === 'dislike' ? 'active' : ''}" data-type="dislike">
+          👎 별로 <span class="count-dislike">${sharedCounts.dislike}</span>
         </button>
       </div>
     `;
@@ -248,22 +269,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Attach reaction click handlers
     card.querySelectorAll('.reaction-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const type = btn.getAttribute('data-type');
-        if (currentReactions.userChoice === type) {
-          currentReactions[type]--;
-          currentReactions.userChoice = null;
+        const prevChoice = userReactionsChoice[reactionKey] || null;
+
+        if (prevChoice === type) {
+          // Toggle off
+          userReactionsChoice[reactionKey] = null;
+          await SupabaseModule.voteReaction(reactionKey, type, -1);
         } else {
-          if (currentReactions.userChoice) {
-            currentReactions[currentReactions.userChoice]--;
+          // Switch or new vote
+          if (prevChoice) {
+            await SupabaseModule.voteReaction(reactionKey, prevChoice, -1);
           }
-          currentReactions[type]++;
-          currentReactions.userChoice = type;
+          userReactionsChoice[reactionKey] = type;
+          await SupabaseModule.voteReaction(reactionKey, type, 1);
         }
 
-        reactionsData[reactionKey] = currentReactions;
-        localStorage.setItem('daeyang_reactions', JSON.stringify(reactionsData));
-        loadMealsForDate(currentDate);
+        localStorage.setItem('daeyang_user_choices', JSON.stringify(userReactionsChoice));
+
+        // Refresh Card Counts immediately
+        const newCounts = await SupabaseModule.getReactions(reactionKey);
+        const likeSpan = card.querySelector('.count-like');
+        const neutralSpan = card.querySelector('.count-neutral');
+        const dislikeSpan = card.querySelector('.count-dislike');
+        if (likeSpan) likeSpan.textContent = newCounts.like;
+        if (neutralSpan) neutralSpan.textContent = newCounts.neutral;
+        if (dislikeSpan) dislikeSpan.textContent = newCounts.dislike;
+
+        // Toggle Active styles
+        card.querySelectorAll('.reaction-btn').forEach(b => {
+          if (b.getAttribute('data-type') === userReactionsChoice[reactionKey]) {
+            b.classList.add('active');
+          } else {
+            b.classList.remove('active');
+          }
+        });
       });
     });
 
@@ -347,6 +388,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initial Load
   renderAllergyChips();
-  loadMealsForDate(currentDate);
+  await loadMealsForDate(currentDate);
   renderWeeklyGrid();
 });
