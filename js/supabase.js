@@ -63,6 +63,12 @@ const SupabaseModule = {
           .eq('meal_id', mealId)
           .single();
 
+        if (error) {
+          if (error.code === '42P01' || error.status === 404) {
+            console.error('🚨 Supabase Error: meal_reactions 테이블이 생성되지 않았습니다! SQL Editor에서 테이블을 생성해주세요.');
+          }
+        }
+
         if (data && !error) {
           return {
             like: data.like_count || 0,
@@ -95,7 +101,7 @@ const SupabaseModule = {
     // Upsert to Supabase
     if (this.client) {
       try {
-        await this.client
+        const { error } = await this.client
           .from('meal_reactions')
           .upsert({
             meal_id: mealId,
@@ -104,6 +110,10 @@ const SupabaseModule = {
             dislike_count: current.dislike,
             updated_at: new Date().toISOString()
           });
+
+        if (error) {
+          console.error('🚨 Supabase Upsert Error:', error.message);
+        }
       } catch (e) {
         console.warn('Supabase upsert error:', e);
       }
