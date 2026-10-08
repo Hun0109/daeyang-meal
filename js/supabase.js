@@ -1,48 +1,49 @@
 /**
- * Daeyang Meal - Zero Signup Shared Reactions Module (GitHub Gist Cloud DB)
+ * Daeyang Meal - Supabase Realtime Shared Cloud Database Module
  */
 const SupabaseModule = {
-  GIST_ID: 'd1a3111337ebc023604f16f6baf0da46',
-  
-  // Dynamic API Key Constructor
-  getKey() {
-    const k1 = 'ghp_';
-    const k2 = 'N65VYBMGF3oYpnA1';
-    const k3 = 'TVXMkaU8t7GA380fCEFj';
-    return `${k1}${k2}${k3}`;
-  },
-  
-  cachedData: {},
+  SUPABASE_URL: 'https://afpsimkmmanxrxyojuuz.supabase.co',
+  SUPABASE_KEY: 'sb_publishable_OV-8fxn_SRrjMQm-Dnq5hA_ebmITTX3',
+
+  client: null,
   realtimeCallbacks: [],
 
   init() {
-    this.fetchCloudData();
-    // Poll cloud DB every 5 seconds for real-time updates across all users
-    setInterval(() => this.fetchCloudData(), 5000);
+    if (window.supabase && window.supabase.createClient) {
+      try {
+        this.client = window.supabase.createClient(this.SUPABASE_URL, this.SUPABASE_KEY);
+        this.setupRealtimeSubscription();
+      } catch (e) {
+        console.warn('Supabase client init error:', e);
+      }
+    }
   },
 
-  async fetchCloudData() {
-    try {
-      const res = await fetch(`https://api.github.com/gists/${this.GIST_ID}`, {
-        headers: {
-          'Authorization': `token ${this.getKey()}`,
-          'Accept': 'application/vnd.github.v3+json'
-        }
-      });
-      const data = await res.json();
-      if (data && data.files && data.files['reactions.json']) {
-        const contentStr = data.files['reactions.json'].content;
-        this.cachedData = JSON.parse(contentStr || '{}');
+  /**
+   * Subscribe to Realtime postgres_changes on 'meal_reactions' table
+   */
+  setupRealtimeSubscription() {
+    if (!this.client) return;
 
-        // Notify UI subscribers
-        document.querySelectorAll('[data-meal-id]').forEach(cardEl => {
-          const mealId = cardEl.getAttribute('data-meal-id');
-          const counts = this.cachedData[mealId] || { like: 0, neutral: 0, dislike: 0 };
-          this.realtimeCallbacks.forEach(cb => cb(mealId, counts));
-        });
-      }
+    try {
+      this.client
+        .channel('public:meal_reactions')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'meal_reactions' }, payload => {
+          if (payload.new) {
+            const mealId = payload.new.meal_id;
+            const updatedCounts = {
+              like: payload.new.like_count || 0,
+              neutral: payload.new.neutral_count || 0,
+              dislike: payload.new.dislike_count || 0
+            };
+
+            // Notify UI subscribers for real-time live update across devices
+            this.realtimeCallbacks.forEach(cb => cb(mealId, updatedCounts));
+          }
+        })
+        .subscribe();
     } catch (e) {
-      console.warn('Cloud DB fetch warning:', e);
+      console.warn('Realtime subscription warning:', e);
     }
   },
 
@@ -50,46 +51,62 @@ const SupabaseModule = {
     this.realtimeCallbacks.push(callback);
   },
 
+  /**
+   * Fetch reaction counts for a meal_id
+   */
   async getReactions(mealId) {
-    if (!this.cachedData[mealId]) {
-      await this.fetchCloudData();
+    if (this.client) {
+      try {
+        const { data, error } = await this.client
+          .from('meal_reactions')
+          .select('*')
+          .eq('meal_id', mealId)
+          .single();
+
+        if (data && !error) {
+          return {
+            like: data.like_count || 0,
+            neutral: data.neutral_count || 0,
+            dislike: data.dislike_count || 0
+          };
+        }
+      } catch (e) {
+        console.warn('Supabase fetch error, fallback to local storage:', e);
+      }
     }
-    return this.cachedData[mealId] || { like: 0, neutral: 0, dislike: 0 };
+
+    // Local Storage fallback if table empty or fetching
+    const local = JSON.parse(localStorage.getItem(`shared_react_${mealId}`) || 'null');
+    return local || { like: 0, neutral: 0, dislike: 0 };
   },
 
+  /**
+   * Vote / Increment reaction for a meal_id
+   */
   async voteReaction(mealId, type, delta = 1) {
-    if (!this.cachedData[mealId]) {
-      this.cachedData[mealId] = { like: 0, neutral: 0, dislike: 0 };
-    }
-
-    const current = this.cachedData[mealId];
+    const current = await this.getReactions(mealId);
     if (type in current) {
       current[type] = Math.max(0, (current[type] || 0) + delta);
     }
 
-    // Save to Local Cache
+    // Save local backup
     localStorage.setItem(`shared_react_${mealId}`, JSON.stringify(current));
 
-    // Update Cloud DB asynchronously
-    try {
-      const body = {
-        files: {
-          'reactions.json': {
-            content: JSON.stringify(this.cachedData)
-          }
-        }
-      };
-
-      await fetch(`https://api.github.com/gists/${this.GIST_ID}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `token ${this.getKey()}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
-    } catch (e) {
-      console.warn('Cloud DB update error:', e);
+    // Upsert to Supabase
+    if (this.client) {
+      try {
+        await this.client
+          .from('meal_reactions')
+          .upsert({
+            meal_id: mealId,
+            like_count: current.like,
+            neutral_count: current.neutral,
+            dislike_count: current.dislike,
+            updated_at: new Date().toISOString()
+          });
+      } catch (e) {
+        console.warn('Supabase upsert error:', e);
+      }
     }
 
     return current;
